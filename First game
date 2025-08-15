@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Flappy Ice Cream</title>
+<style>
+  :root {
+    --bg: #0e1320;
+    --ground: #0a0f18;
+    --pipe: #d4a373;
+    --pipe-dark: #b08968;
+    --bird: #ffd166;
+    --text: #e8eefc;
+    --shadow: rgba(0,0,0,.25);
+    --accent: #6c8cff;
+
+    /* Julie-inspired palette */
+    --skin: #ffd9c7;
+    --hair: #c6573b;
+    --hair-dark: #a64733;
+    --tee: #5c8aa6;
+    --eye: #2a2a2a;
+    --cheek: #ffb7b7;
+    --beak: #ff9f1c;
+  }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, "Helvetica Neue", Arial, sans-serif;
+    height: 100%;
+  }
+  #wrap { display: grid; place-items: center; height: 100dvh; width: 100vw; }
+  canvas { display:block; touch-action: none; border-radius: 18px; box-shadow: 0 10px 30px var(--shadow); background: linear-gradient(180deg, #12203a, #0f1b2f 60%, #0e1626); }
+  .hud { position: fixed; inset: 0; display: grid; place-items: start center; pointer-events: none; padding-top: env(safe-area-inset-top, 16px); }
+  .score { margin-top: 8px; font-weight: 800; font-size: 28px; letter-spacing: 1px; text-shadow: 0 2px 6px var(--shadow); }
+  .btnbar { position: fixed; bottom: calc(env(safe-area-inset-bottom, 16px) + 12px); left: 0; right: 0; display: flex; gap: 10px; justify-content: center; pointer-events: auto; }
+  button { -webkit-tap-highlight-color: transparent; background: #152341; color: var(--text); border: 1px solid #22345e; padding: 10px 14px; border-radius: 12px; font-weight: 600; font-size: 14px; box-shadow: 0 6px 14px var(--shadow); }
+  button:active { transform: translateY(1px); }
+  .small { position: fixed; top: 8px; right: 10px; opacity: .7; font-size: 12px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="360" height="640"></canvas>
+</div>
+
+<div class="hud">
+  <div class="score" id="score">0</div>
+</div>
+
+<div class="btnbar">
+  <button id="play">Play / Restart</button>
+  <button id="pause">Pause</button>
+</div>
+
+<div class="small" id="hi"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const scoreEl = document.getElementById('score');
+  const hiEl = document.getElementById('hi');
+  const btnPlay = document.getElementById('play');
+  const btnPause = document.getElementById('pause');
+
+  function fitCanvas() {
+    const maxW = Math.min(window.innerWidth, 560);
+    const maxH = Math.min(window.innerHeight, 960);
+    let w = maxW, h = Math.round(maxW * 16 / 9);
+    if (h > maxH) { h = maxH; w = Math.round(maxH * 9 / 16); }
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    world.w = w; world.h = h;
+  }
+
+  const world = { w: 360, h: 640, started: false, paused: false, over: false, score: 0, hi: +localStorage.getItem('flappy_hi') || 0, t: 0 };
+  fitCanvas();
+  window.addEventListener('resize', fitCanvas);
+
+  const bird = { x: 90, y: 0, r: 14, vy: 0, gravity: 1200, flap: -300, maxVy: 600, rotation: 0 };
+
+  const pipes = [];
+  const pipeCfg = { gap: 140, w: 66, speed: 150, spacing: 220, lastX: 0, minGapY: 80, maxGapY: () => world.h - 180 };
+
+  function reset() {
+    world.started = false; world.paused = false; world.over = false;
+    world.score = 0; world.t = 0;
+    bird.y = world.h * 0.45; bird.vy = 0; bird.rotation = 0;
+    pipes.length = 0;
+    pipeCfg.lastX = world.w + 60;
+    for (let i = 0; i < 4; i++) spawnPipe(pipeCfg.lastX + i * pipeCfg.spacing);
+    updateHUD(); draw(0);
+  }
+
+  function spawnPipe(x) {
+    const gapCenter = rand(pipeCfg.minGapY + pipeCfg.gap/2, pipeCfg.maxGapY() - pipeCfg.gap/2);
+    pipes.push({ x, gapY: gapCenter, passed: false });
+  }
+
+  function rand(min, max) { return Math.random() * (max - min) + min; }
+
+  function start() {
+    if (world.over) reset();
+    world.started = true; world.paused = false;
+    lastTs = performance.now();
+    requestAnimationFrame(tick);
+  }
+
+  function togglePause() {
+    if (!world.started || world.over) return;
+    world.paused = !world.paused;
+    if (!world.paused) { lastTs = performance.now(); requestAnimationFrame(tick); }
+    else { draw(0); }
+  }
+
+  function gameOver() {
+    world.over = true; world.started = false;
+    if (world.score > world.hi) {
+      world.hi = world.score;
+      localStorage.setItem('flappy_hi', String(world.hi));
+    }
+    updateHUD(); draw(0);
+  }
+
+  function flap() {
+    if (world.over) return;
+    if (!world.started) { start(); return; }
+    if (world.paused) return;
+    bird.vy = bird.flap; bird.y -= 1;
+  }
+
+  canvas.addEventListener('pointerdown', e => { e.preventDefault(); flap(); }, { passive: false });
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); flap(); }
+    if (e.code === 'KeyP') togglePause();
+    if (e.code === 'Enter') start();
+  });
+  btnPlay.addEventListener('click', start);
+  btnPause.addEventListener('click', togglePause);
+
+  function updateHUD() {
+    scoreEl.textContent = world.score.toString();
+    hiEl.textContent = `Best: ${world.hi}`;
+  }
+
+  let lastTs = 0;
+  function tick(ts) {
+    const dt = Math.min(0.033, (ts - lastTs) / 1000);
+    lastTs = ts;
+    if (!world.started || world.paused || world.over) return;
+    world.t += dt;
+
+    bird.vy = Math.min(bird.maxVy, bird.vy + bird.gravity * dt);
+    bird.y += bird.vy * dt;
+    bird.rotation = Math.atan2(bird.vy, 300);
+
+    for (const p of pipes) p.x -= pipeCfg.speed * dt;
+    if (pipes.length && pipes[0].x + pipeCfg.w < -40) pipes.shift();
+    if (pipes.length === 0 || (pipeCfg.lastX - pipes[pipes.length - 1].x) >= pipeCfg.spacing - 1) {
+      pipeCfg.lastX = (pipes.length ? pipes[pipes.length - 1].x : world.w) + pipeCfg.spacing;
+      spawnPipe(pipeCfg.lastX);
+    }
+
+    const bx = bird.x, by = bird.y, br = bird.r;
+    for (const p of pipes) {
+      if (!p.passed && p.x + pipeCfg.w < bx) { p.passed = true; world.score++; updateHUD(); pipeCfg.gap = Math.max(110, 140 - world.score * 1.2); }
+      const topPipeBottom = p.gapY - pipeCfg.gap / 2;
+      const botPipeTop = p.gapY + pipeCfg.gap / 2;
+      const withinX = (bx + br) > p.x && (bx - br) < (p.x + pipeCfg.w);
+      if (withinX) {
+        if ((by - br) < topPipeBottom || (by + br) > botPipeTop) { gameOver(); break; }
+      }
+    }
+
+    if (bird.y - br < 0) { bird.y = br; bird.vy = 0; }
+    if (bird.y + br > world.h - 8) { bird.y = world.h - 8 - br; gameOver(); }
+
+    draw(dt);
+    if (!world.over && !world.paused) requestAnimationFrame(tick);
+  }
+
+  function draw(dt) {
+    const w = world.w, h = world.h;
+    ctx.clearRect(0, 0, w, h);
+    ctx.globalAlpha = 0.2;
+    for (let i = 0; i < 30; i++) {
+      const x = (i * 97 + (world.t * -20)) % (w + 40) - 20;
+      const y = (i * 53) % (h * 0.7);
+      ctx.fillStyle = '#cfe2ff';
+      ctx.fillRect(x, y, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+
+    for (const p of pipes) {
+      const pipeX = Math.round(p.x);
+      const topH = Math.round(p.gapY - pipeCfg.gap / 2);
+      const botY = Math.round(p.gapY + pipeCfg.gap / 2);
+      drawCone(pipeX, 0, pipeCfg.w, topH, true); // top cone
+      drawCone(pipeX, botY, pipeCfg.w, h - botY - 8, false); // bottom cone
+    }
+
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(0, h - 8, w, 8);
+    drawBird();
+
+    if (!world.started && !world.over) { labelCenter('Tap to start', w/2, h*0.42, 22); labelCenter('Tap anywhere to flap', w/2, h*0.48, 14, 0.6); }
+    if (world.paused) { labelCenter('Paused', w/2, h*0.45, 22); labelCenter('Tap P or button to resume', w/2, h*0.51, 14, 0.7); }
+    if (world.over) { labelCenter('Game Over', w/2, h*0.42, 26); labelCenter(`Score ${world.score}  •  Best ${world.hi}`, w/2, h*0.49, 16, 0.9); labelCenter('Press Play / tap to try again', w/2, h*0.56, 14, 0.7); }
+  }
+
+  function drawCone(x, y, w, h, upsideDown) {
+    const coneColor = '#d4a373';
+    const scoopColors = ['#f7d9d9', '#ffefd5', '#b5e7a0', '#d7bde2', '#f5cba7'];
+    const scoop = scoopColors[Math.floor(Math.random() * scoopColors.length)];
+
+    ctx.save();
+    ctx.translate(x, y);
+    if (upsideDown) {
+      ctx.translate(0, h);
+      ctx.scale(1, -1);
+    }
+
+    ctx.fillStyle = coneColor;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(w, 0);
+    ctx.lineTo(w/2, h - 20);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.ellipse(w/2, 0, w/2, 20, 0, Math.PI, 0);
+    ctx.fillStyle = scoop;
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawBird() {
+    const { x, y, r } = bird;
+    const skin = getComputedStyle(document.documentElement).getPropertyValue('--skin').trim();
+    const hair = getComputedStyle(document.documentElement).getPropertyValue('--hair').trim();
+    const hairDark = getComputedStyle(document.documentElement).getPropertyValue('--hair-dark').trim();
+    const tee = getComputedStyle(document.documentElement).getPropertyValue('--tee').trim();
+    const eye = getComputedStyle(document.documentElement).getPropertyValue('--eye').trim();
+    const cheek = getComputedStyle(document.documentElement).getPropertyValue('--cheek').trim();
+    const beak = getComputedStyle(document.documentElement).getPropertyValue('--beak').trim();
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(bird.rotation * 0.6);
+    ctx.beginPath(); ctx.arc(0, 2, r + 2, 0, Math.PI * 2); ctx.fillStyle = tee; ctx.fill();
+    const wingY = Math.sin(world.t * 18) * 3 - 1;
+    ctx.beginPath(); ctx.ellipse(-6, wingY + 4, 9, 6, -0.2, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fill();
+    const headR = r * 0.95;
+    ctx.beginPath(); ctx.ellipse(-4, -2, headR + 4, headR, 0, 0, Math.PI * 2); ctx.fillStyle = hairDark; ctx.fill();
+    ctx.beginPath(); ctx.ellipse(-headR - 2, 0, 7, 5, 0.2, 0, Math.PI * 2); ctx.fillStyle = hair; ctx.fill();
+    ctx.beginPath(); ctx.arc(0, -2, headR, 0, Math.PI * 2); ctx.fillStyle = skin; ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-headR, -8); ctx.quadraticCurveTo(-headR * 0.2, -headR - 2, headR * 0.7, -6);
+    ctx.lineTo(headR * 0.7, -1); ctx.quadraticCurveTo(0, -5, -headR, -2); ctx.closePath(); ctx.fillStyle = hair; ctx.fill();
+    ctx.beginPath(); ctx.arc(headR * 0.28, -6, 2.3, 0, Math.PI * 2); ctx.arc(-headR * 0.02, -6.5, 2.0, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(headR * 0.28, -6, 1.1, 0, Math.PI * 2); ctx.arc(-headR * 0.02, -6.5, 1.0, 0, Math.PI * 2); ctx.fillStyle = eye; ctx.fill();
+    ctx.lineWidth = 1.2; ctx.strokeStyle = hairDark;
+    ctx.beginPath(); ctx.moveTo(-2, -11); ctx.quadraticCurveTo(2, -12, 6, -11.2);
+    ctx.moveTo(-10, -11.8); ctx.quadraticCurveTo(-6, -12.6, -2, -12); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(headR * 0.95, -1); ctx.lineTo(headR + 9, 2); ctx.lineTo(headR * 0.95, 5); ctx.closePath(); ctx.fillStyle = beak; ctx.fill();
+    ctx.beginPath(); ctx.arc(-6, -1, 2.6, 0, Math.PI * 2); ctx.arc(8, 0, 2.8, 0, Math.PI * 2);
+    ctx.fillStyle = cheek; ctx.globalAlpha = 0.55; ctx.fill(); ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  function labelCenter(text, x, y, size=20, opacity=1) {
+    ctx.save(); ctx.globalAlpha = opacity; ctx.font = `700 ${size}px system-ui`; ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.textAlign = 'center';
+    ctx.fillText(text, x+1.5, y+1.5); ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim(); ctx.fillText(text, x, y); ctx.restore();
+  }
+
+  reset();
+})();
+</script>
+</body>
+</html>
